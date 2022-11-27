@@ -1,2 +1,2 @@
-# lineupnodes
-Blender Add-on For Arranging Nodes of Geometry/Shader/Compositor Node Tree
+# Line Up Nodes
+This Blender add-on arranges nodes of the node tree of compositor /  shader / geometry nodes 
