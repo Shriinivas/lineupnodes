@@ -213,7 +213,7 @@ class LineupNodesParams(PropertyGroup):
     yOffset: IntProperty(name='Height Separation', default=50,
                          description='Separation between node rows')
 
-    includeGroup: BoolProperty(name='Include Group', default=False,
+    includeGroup: BoolProperty(name='Include Group', default=True,
                               description='Lineup group node tree')
 
     maxColNodes: IntProperty(name='Max Column Nodes', default=10,
