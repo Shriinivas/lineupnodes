@@ -201,6 +201,7 @@ def displayTree(
     )
     groupNodes = displayNodes(nodeGraph, vAlign, xOffset, yOffset)
     if includeGroup:
+        processedTrees = set()
         for node in groupNodes:
             nodeTree.nodes.active = node
             override = getOverride()
@@ -208,15 +209,17 @@ def displayTree(
                 bpy.ops.node.group_edit(exit=False)
                 bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
                 childNodeTree = node.node_tree
-                displayTree(
-                    childNodeTree,
-                    vAlign,
-                    xOffset,
-                    yOffset,
-                    includeGroup,
-                    arrangeType,
-                    maxColNodes,
-                )
+                if childNodeTree not in processedTrees:
+                    displayTree(
+                        childNodeTree,
+                        vAlign,
+                        xOffset,
+                        yOffset,
+                        includeGroup,
+                        arrangeType,
+                        maxColNodes,
+                    )
+                    processedTrees.add(childNodeTree)
             with bpy.context.temp_override(**override):
                 bpy.ops.node.group_edit(exit=True)
                 bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
