@@ -59,21 +59,52 @@ class SrcLinkInfo:
 
 
 def getActiveNodeTree(context):
-    obj = context.active_object
+    """Get the active node tree based on the current UI type.
+    
+    Returns:
+        NodeTree or None: The active node tree, or None if not available or error occurred.
+    """
     uitype = context.area.ui_type
     nodeTree = None
+    
     if uitype == "ShaderNodeTree":
-        return obj.active_material.node_tree
+        obj = context.active_object
+        if obj is None:
+            return None, "No active object selected. Please select an object."
+        if obj.active_material is None:
+            return None, f"Object '{obj.name}' has no active material. Please add a material."
+        nodeTree = obj.active_material.node_tree
+        if nodeTree is None:
+            return None, f"Material '{obj.active_material.name}' has no node tree. Please use nodes."
+            
     elif uitype == "GeometryNodeTree":
-        return obj.modifiers.active.node_group
+        obj = context.active_object
+        if obj is None:
+            return None, "No active object selected. Please select an object."
+        if obj.modifiers.active is None:
+            return None, f"Object '{obj.name}' has no active modifier. Please add a Geometry Nodes modifier."
+        if obj.modifiers.active.type != 'NODES':
+            return None, f"Active modifier is not a Geometry Nodes modifier. Please select a Geometry Nodes modifier."
+        nodeTree = obj.modifiers.active.node_group
+        if nodeTree is None:
+            return None, "Geometry Nodes modifier has no node group. Please assign a node group."
+            
     elif uitype == "CompositorNodeTree":
-        return context.scene.node_tree
-    return nodeTree
+        nodeTree = context.scene.node_tree
+        if nodeTree is None:
+            return None, "Compositor has no node tree. Please enable 'Use Nodes' in compositor."
+    
+    return nodeTree, None
 
 
 def processNodes(
-    srcNodeMap, nodeGraph, nodeTree, destNode, srcNodes, depth, arrangeType, maxColNodes
+    srcNodeMap, nodeGraph, nodeTree, destNode, srcNodes, depth, arrangeType, maxColNodes, maxDepth=100
 ):
+    # T002: Prevent infinite recursion with depth limit
+    if depth >= maxDepth:
+        print(f"Warning: Maximum graph depth ({maxDepth}) reached. Possible cycle detected or very deep node tree.")
+        return
+    
     if len(nodeGraph) == depth:
         nodeGraph.append([])
     nodeColumn = nodeGraph[depth]
@@ -114,9 +145,8 @@ def processNodes(
                 else:
                     continue
 
-        nodeGraph.append([])
-        nodeColumn = nodeGraph[depth]
-        nodeColumn.append(node)
+        # T003 Fix: Removed duplicate append - line 103-104 already creates column
+        nodeGraph[depth].append(node)
         srcNodes = {k.from_node for k in nodeTree.links if k.to_node == node}
         processNodes(
             srcNodeMap,
@@ -161,10 +191,23 @@ def displayNodes(nodeGraph, vAlign, xOffset, yOffset):
 
 
 def getOverride():
+    """Get context override for node editor operations.
+    
+    Returns:
+        dict or None: Context override dictionary, or None if NODE_EDITOR not found.
+    """
     win = bpy.context.window
     screen = win.screen
-    area = [a for a in screen.areas if a.type == "NODE_EDITOR"][0]
+    # T004: Validate NODE_EDITOR area exists
+    node_editor_areas = [a for a in screen.areas if a.type == "NODE_EDITOR"]
+    if not node_editor_areas:
+        print("Warning: No NODE_EDITOR area found in current layout.")
+        return None
+    area = node_editor_areas[0]
     region = [region for region in area.regions if region.type == "WINDOW"]
+    if not region:
+        print("Warning: No WINDOW region found in NODE_EDITOR area.")
+        return None
     return {"window": win, "screen": screen, "area": area, "region": region[0]}
 
 
@@ -183,6 +226,10 @@ def createSrcNodeMap(nodeTree):
 def displayTree(
     nodeTree, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes
 ):
+    # Early exit if node tree is empty (T005)
+    if len(nodeTree.nodes) == 0:
+        return "No nodes to arrange in the node tree."
+    
     srcNodeMap = createSrcNodeMap(nodeTree)
     # print(srcNodeMap)
     nodeGraph = []
@@ -205,6 +252,10 @@ def displayTree(
         for node in groupNodes:
             nodeTree.nodes.active = node
             override = getOverride()
+            if override is None:
+                # Skip group processing if NODE_EDITOR not available
+                print("Warning: Skipping group node processing - NODE_EDITOR area not found.")
+                break
             with bpy.context.temp_override(**override):
                 bpy.ops.node.group_edit(exit=False)
                 bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
@@ -226,10 +277,13 @@ def displayTree(
 
 
 def main(context, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes):
-    nodeTree = getActiveNodeTree(context)
-    displayTree(
+    nodeTree, error = getActiveNodeTree(context)
+    if error:
+        return error
+    error = displayTree(
         nodeTree, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes
     )
+    return error
 
 
 class LineupNodesParams(PropertyGroup):
@@ -304,7 +358,7 @@ class LineupNodesOp(Operator):
 
     def execute(self, context):
         params = bpy.context.window_manager.lineupNodeParams
-        main(
+        error = main(
             context,
             params.vAlign,
             params.xOffset,
@@ -313,7 +367,10 @@ class LineupNodesOp(Operator):
             params.arrangeType,
             params.maxColNodes,
         )
-        return {"FINISHED"}
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        return {'FINISHED'}
 
 
 def register():
