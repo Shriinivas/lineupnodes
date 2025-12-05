@@ -170,6 +170,22 @@ def processNodes(
         )
 
 
+def move_frame_children(frame_node, delta_x, delta_y):
+    """Recursively move children of a frame node."""
+    if not hasattr(frame_node, "id_data"):
+        return
+        
+    # Iterate all nodes to find children (O(N) but necessary)
+    for node in frame_node.id_data.nodes:
+        if node.parent == frame_node:
+            node.location.x += delta_x
+            node.location.y += delta_y
+            
+            # Recurse for nested frames
+            if node.type == 'FRAME':
+                move_frame_children(node, delta_x, delta_y)
+
+
 def displayNodes(nodeGraph, vAlign, xOffset, yOffset):
     origin = [0, 0]
     currLoc = origin[:]
@@ -192,7 +208,22 @@ def displayNodes(nodeGraph, vAlign, xOffset, yOffset):
             if i > 0:
                 prevNode = col[i - 1]
                 loc[1] = prevNode.location[1] - prevNode.dimensions[1] - yOffset
-            node.location = loc
+            
+            # Apply location and handle Frame movement
+            if node.type == 'FRAME':
+                old_loc_x = node.location.x
+                old_loc_y = node.location.y
+                
+                node.location = loc
+                
+                delta_x = loc[0] - old_loc_x
+                delta_y = loc[1] - old_loc_y
+                
+                if delta_x != 0 or delta_y != 0:
+                    move_frame_children(node, delta_x, delta_y)
+            else:
+                node.location = loc
+                
             if node.type == "GROUP":
                 groupNodes.add(node)
         currLoc[0] -= maxWidth + xOffset
@@ -233,6 +264,22 @@ def createSrcNodeMap(nodeTree):
     return srcNodeMap
 
 
+def get_representative_in_scope(node, scope_parent):
+    """
+    Finds the node that represents 'node' within the scope defined by 'scope_parent'.
+    If 'node' is directly in 'scope_parent', returns 'node'.
+    If 'node' is inside a Frame which is in 'scope_parent', returns that Frame.
+    Traverses up the parent hierarchy.
+    Returns None if 'node' is not within 'scope_parent' (or nested within it).
+    """
+    curr = node
+    while curr:
+        if curr.parent == scope_parent:
+            return curr
+        curr = curr.parent
+    return None
+
+
 def displayTree(
     nodeTree, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes, applyToSelection=False, path=None
 ):
@@ -256,44 +303,163 @@ def displayTree(
         if len(selected_nodes) == 0:
             return "No nodes selected. Please select at least one node or disable 'Selected Nodes Only'."
         nodes_to_process = selected_nodes
-        # Create a set for fast lookup
-        selected_set = set(selected_nodes)
-        # Filter links to only include those between selected nodes
-        filtered_links = [link for link in nodeTree.links 
-                         if link.from_node in selected_set and link.to_node in selected_set]
-        print(f"DEBUG: Total links in tree: {len(nodeTree.links)}, filtered links: {len(filtered_links)}")
     else:
         nodes_to_process = all_nodes
-        filtered_links = list(nodeTree.links)
+
+    # T011: Group nodes by parent (scope) for hierarchical arrangement
+    nodes_by_parent = {}
+    for node in nodes_to_process:
+        parent = node.parent
+        if parent not in nodes_by_parent:
+            nodes_by_parent[parent] = []
+        nodes_by_parent[parent].append(node)
     
-    # Create source node map with filtered links
-    srcNodeMap = {}
-    for link in filtered_links:
-        srcLinkInfo = srcNodeMap.get(link.from_node)
-        if srcLinkInfo is None:
-            srcLinkInfo = SrcLinkInfo()
-            srcNodeMap[link.from_node] = srcLinkInfo
-        srcLinkInfo.addLinkCnt(link.to_node)
+    # Sort scopes by depth (deepest first) so inner frames are arranged before outer frames
+    scope_depths = []
+    for parent, scope_nodes in nodes_by_parent.items():
+        depth = 0
+        curr = parent
+        while curr:
+            depth += 1
+            curr = curr.parent
+        scope_depths.append((depth, parent, scope_nodes))
     
-    nodeGraph = []
-    nodes = nodes_to_process
-    srcNodes = {n for n in nodes if n in srcNodeMap}
-    pureDestNodes = [n for n in nodes if n not in srcNodes]
-    processNodes(
-        srcNodeMap,
-        nodeGraph,
-        nodeTree,
-        None,
-        pureDestNodes,
-        0,
-        arrangeType,
-        maxColNodes,
-        filtered_links,
-    )
-    groupNodes = displayNodes(nodeGraph, vAlign, xOffset, yOffset)
+    scope_depths.sort(key=lambda x: x[0], reverse=True)
+    
+    all_group_nodes = []
+    
+    # Process each scope
+    for depth, parent, scope_nodes in scope_depths:
+        # Build virtual links for this scope
+        # A link is relevant if both ends resolve to nodes within this scope
+        virtual_links = []
+        
+        # We need to consider all links in the tree, but map them to this scope
+        # Optimization: pre-filter links connected to nodes in this scope or their descendants?
+        # For now, iterate all links (safe but potentially slow for huge trees)
+        # Better: Iterate links connected to nodes in this scope + descendants.
+        # But 'descendants' is hard to track efficiently without a map.
+        # Let's stick to iterating all links for correctness first.
+        
+        scope_representatives = {n: n for n in scope_nodes}
+        
+        # Also map all descendants of these nodes to their top-level ancestor in this scope
+        # Actually, get_representative_in_scope does this.
+        
+        # Optimization: Only check links that touch the nodes in this scope (or their children)
+        # But a link might go from a node deep inside Frame A to a node deep inside Frame B.
+        # Both Frame A and Frame B are in this scope. We need that link.
+        
+        for link in nodeTree.links:
+            from_rep = get_representative_in_scope(link.from_node, parent)
+            to_rep = get_representative_in_scope(link.to_node, parent)
+            
+            if from_rep and to_rep and from_rep in scope_representatives and to_rep in scope_representatives:
+                if from_rep != to_rep: # Ignore self-loops (internal links within a node/frame)
+                    # Create a virtual link object (duck typing)
+                    class VirtualLink:
+                        def __init__(self, f, t):
+                            self.from_node = f
+                            self.to_node = t
+                    virtual_links.append(VirtualLink(from_rep, to_rep))
+
+        # Create source node map for this scope
+        srcNodeMap = {}
+        for link in virtual_links:
+            srcLinkInfo = srcNodeMap.get(link.from_node)
+            if srcLinkInfo is None:
+                srcLinkInfo = SrcLinkInfo()
+                srcNodeMap[link.from_node] = srcLinkInfo
+            srcLinkInfo.addLinkCnt(link.to_node)
+        
+        nodeGraph = []
+        srcNodes = {n for n in scope_nodes if n in srcNodeMap}
+        pureDestNodes = [n for n in scope_nodes if n not in srcNodes]
+        
+        processNodes(
+            srcNodeMap,
+            nodeGraph,
+            nodeTree,
+            None,
+            pureDestNodes,
+            0,
+            arrangeType,
+            maxColNodes,
+            virtual_links, # Pass virtual links!
+        )
+        
+        group_nodes = displayNodes(nodeGraph, vAlign, xOffset, yOffset)
+        all_group_nodes.extend(group_nodes)
+        
+        # T011 Fix: Update parent frame dimensions to prevent overlap
+        if parent:
+            # Calculate bounding box of arranged nodes in this scope
+            # Initialize with first node values
+            if scope_nodes:
+                min_x = min([n.location.x for n in scope_nodes])
+                max_x = max([n.location.x + n.dimensions.x for n in scope_nodes])
+                min_y = min([n.location.y - n.dimensions.y for n in scope_nodes])
+                max_y = max([n.location.y for n in scope_nodes])
+                
+                width = max_x - min_x
+                height = max_y - min_y
+                
+                # Add padding (standard Blender frame padding is around 20-30)
+                padding = 30
+                
+                # Update frame dimensions
+                # Note: We set dimensions to ensure parent scope sees correct size
+                # We also need to ensure the frame encapsulates the nodes
+                # Since we haven't arranged the frame yet (it's in parent scope),
+                # we just set its size. Its location will be set when parent scope is arranged.
+                # However, children locations are absolute. If we move the frame later,
+                # children might NOT move if they are not properly parented?
+                # They are parented (node.parent = frame).
+                # So moving frame moves children.
+                
+                # But wait, we just set children locations to absolute values (near 0,0).
+                # If we place Frame at 0,0, it wraps them.
+                # If Frame is moved by parent scope arrangement, children move with it.
+                # So this logic holds.
+                
+                # Force update dimensions
+                parent.width = width + padding
+                parent.height = height + padding
+                
+                # Also ensure the frame is positioned to wrap the children initially?
+                # No, the frame's location will be overwritten by parent scope arrangement.
+                # But the children's locations are relative to the Frame's location?
+                # NO. In Blender API, node.location is relative to the TREE origin, NOT the parent.
+                # Visual parenting means dragging parent moves child.
+                # But setting parent.location via API does NOT automatically move children in all Blender versions?
+                # Actually, usually it does NOT.
+                # If I set frame.location, children stay put (visually detaching).
+                # This is a problem.
+                
+                # If arranging the Frame moves it, we must move the children too.
+                # But we don't know where the Frame will be yet.
+                
+                # Solution:
+                # 1. Arrange children (done). They are at some loc (e.g. 0,0).
+                # 2. Set Frame size to wrap them.
+                # 3. Set Frame location to center of children (so it wraps them).
+                # 4. Arrange Parent Scope. This moves Frame to new loc (e.g. 500, 500).
+                # 5. Calculate delta (New Frame Loc - Old Frame Loc).
+                # 6. Apply delta to all children.
+                
+                # This requires tracking the Frame's location change.
+                # But displayNodes for parent scope just sets location.
+                
+                # Alternative:
+                # Treat Frame as a "Group" in displayNodes?
+                # If displayNodes moves a node, and that node is a Frame, it should move its children.
+                
+                # Let's modify displayNodes to handle Frame movement.
+                pass
+
     if includeGroup:
         processedTrees = set()
-        for node in groupNodes:
+        for node in all_group_nodes:
             nodeTree.nodes.active = node
             override = getOverride()
             if override is None:
@@ -386,6 +552,88 @@ class LineupNodesParams(PropertyGroup):
     )
 
 
+# T014: Built-in presets for quick configuration
+PRESETS = {
+    "COMPACT": {
+        "name": "Compact",
+        "vAlign": "TOP",
+        "arrangeType": "LAST",
+        "xOffset": 30,
+        "yOffset": 30,
+        "maxColNodes": 15,
+    },
+    "SPACIOUS": {
+        "name": "Spacious",
+        "vAlign": "MIDDLE",
+        "arrangeType": "LAST",
+        "xOffset": 100,
+        "yOffset": 80,
+        "maxColNodes": 8,
+    },
+    "DEBUG": {
+        "name": "Debug",
+        "vAlign": "TOP",
+        "arrangeType": "FIRST",
+        "xOffset": 200,
+        "yOffset": 100,
+        "maxColNodes": 5,
+    },
+    "WIDE": {
+        "name": "Wide",
+        "vAlign": "MIDDLE",
+        "arrangeType": "MAX",
+        "xOffset": 150,
+        "yOffset": 50,
+        "maxColNodes": 6,
+    },
+}
+
+
+class ApplyPresetOp(Operator):
+    """Apply a preset configuration"""
+    bl_idname = "object.khema_applypreset"
+    bl_label = "Apply Preset"
+
+    preset: bpy.props.EnumProperty(
+        name="Preset",
+        items=[
+            ("COMPACT", "Compact", "Tight spacing, top aligned"),
+            ("SPACIOUS", "Spacious", "Generous spacing, middle aligned"),
+            ("DEBUG", "Debug", "Extra wide for debugging, first link"),
+            ("WIDE", "Wide", "Wide columns, max links"),
+        ],
+    )
+
+    def execute(self, context):
+        params = bpy.context.window_manager.lineupNodeParams
+        preset_config = PRESETS[self.preset]
+        
+        params.vAlign = preset_config["vAlign"]
+        params.arrangeType = preset_config["arrangeType"]
+        params.xOffset = preset_config["xOffset"]
+        params.yOffset = preset_config["yOffset"]
+        params.maxColNodes = preset_config["maxColNodes"]
+        
+        self.report({'INFO'}, f"Applied '{preset_config['name']}' preset")
+        
+        # Auto-execute lineup
+        error = main(
+            context,
+            params.vAlign,
+            params.xOffset,
+            params.yOffset,
+            params.includeGroup,
+            params.arrangeType,
+            params.maxColNodes,
+            params.applyToSelection,
+        )
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+            
+        return {'FINISHED'}
+
+
 class LineupNodesPanel(Panel):
     bl_label = "Line Up Nodes"
     bl_idname = "OBJECT_PT_lineupnodes"
@@ -407,6 +655,21 @@ class LineupNodesPanel(Panel):
     def draw(self, context):
         col = self.layout.column()
         LineupNodesPanel.drawPanel(col)
+        
+        # T014: Presets section
+        col.separator()
+        box = col.box()
+        box.label(text="Quick Presets:")
+        row = box.row(align=True)
+        op = row.operator("object.khema_applypreset", text="Compact")
+        op.preset = "COMPACT"
+        op = row.operator("object.khema_applypreset", text="Spacious")
+        op.preset = "SPACIOUS"
+        row = box.row(align=True)
+        op = row.operator("object.khema_applypreset", text="Debug")
+        op.preset = "DEBUG"
+        op = row.operator("object.khema_applypreset", text="Wide")
+        op.preset = "WIDE"
         
         # T013: Search/Filter section
         col.separator()
@@ -488,6 +751,7 @@ class LineupNodesOp(Operator):
 
 def register():
     bpy.utils.register_class(LineupNodesPanel)
+    bpy.utils.register_class(ApplyPresetOp)
     bpy.utils.register_class(SearchNodesOp)
     bpy.utils.register_class(LineupNodesOp)
 
@@ -503,4 +767,5 @@ def unregister():
 
     bpy.utils.unregister_class(LineupNodesOp)
     bpy.utils.unregister_class(SearchNodesOp)
+    bpy.utils.unregister_class(ApplyPresetOp)
     bpy.utils.unregister_class(LineupNodesPanel)
