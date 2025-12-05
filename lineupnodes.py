@@ -59,10 +59,10 @@ class SrcLinkInfo:
 
 
 def getActiveNodeTree(context):
-    """Get the active node tree based on the current UI type.
+    """Get the active/edited node tree based on the current UI type.
     
     Returns:
-        NodeTree or None: The active node tree, or None if not available or error occurred.
+        tuple: (nodeTree, error, path) where path is the edit tree path
     """
     uitype = context.area.ui_type
     nodeTree = None
@@ -70,35 +70,44 @@ def getActiveNodeTree(context):
     if uitype == "ShaderNodeTree":
         obj = context.active_object
         if obj is None:
-            return None, "No active object selected. Please select an object."
+            return None, "No active object selected. Please select an object.", None
         if obj.active_material is None:
-            return None, f"Object '{obj.name}' has no active material. Please add a material."
+            return None, f"Object '{obj.name}' has no active material. Please add a material.", None
         nodeTree = obj.active_material.node_tree
         if nodeTree is None:
-            return None, f"Material '{obj.active_material.name}' has no node tree. Please use nodes."
+            return None, f"Material '{obj.active_material.name}' has no node tree. Please use nodes.", None
             
     elif uitype == "GeometryNodeTree":
         obj = context.active_object
         if obj is None:
-            return None, "No active object selected. Please select an object."
+            return None, "No active object selected. Please select an object.", None
         if obj.modifiers.active is None:
-            return None, f"Object '{obj.name}' has no active modifier. Please add a Geometry Nodes modifier."
+            return None, f"Object '{obj.name}' has no active modifier. Please add a Geometry Nodes modifier.", None
         if obj.modifiers.active.type != 'NODES':
-            return None, f"Active modifier is not a Geometry Nodes modifier. Please select a Geometry Nodes modifier."
+            return None, f"Active modifier is not a Geometry Nodes modifier. Please select a Geometry Nodes modifier.", None
         nodeTree = obj.modifiers.active.node_group
         if nodeTree is None:
-            return None, "Geometry Nodes modifier has no node group. Please assign a node group."
+            return None, "Geometry Nodes modifier has no node group. Please assign a node group.", None
             
     elif uitype == "CompositorNodeTree":
         nodeTree = context.scene.node_tree
         if nodeTree is None:
-            return None, "Compositor has no node tree. Please enable 'Use Nodes' in compositor."
+            return None, "Compositor has no node tree. Please enable 'Use Nodes' in compositor.", None
     
-    return nodeTree, None
+    # Get the currently edited tree (for when inside a group)
+    space = context.space_data
+    if space and hasattr(space, 'edit_tree') and space.edit_tree:
+        # User is inside a node group, use the edited tree
+        edit_tree = space.edit_tree
+        # Get the path to know which node we're editing
+        path = list(space.path) if hasattr(space, 'path') else []
+        return edit_tree, None, path
+    
+    return nodeTree, None, []
 
 
 def processNodes(
-    srcNodeMap, nodeGraph, nodeTree, destNode, srcNodes, depth, arrangeType, maxColNodes, maxDepth=100
+    srcNodeMap, nodeGraph, nodeTree, destNode, srcNodes, depth, arrangeType, maxColNodes, filteredLinks, maxDepth=100
 ):
     # T002: Prevent infinite recursion with depth limit
     if depth >= maxDepth:
@@ -147,7 +156,7 @@ def processNodes(
 
         # T003 Fix: Removed duplicate append - line 103-104 already creates column
         nodeGraph[depth].append(node)
-        srcNodes = {k.from_node for k in nodeTree.links if k.to_node == node}
+        srcNodes = {k.from_node for k in filteredLinks if k.to_node == node}
         processNodes(
             srcNodeMap,
             nodeGraph,
@@ -157,6 +166,7 @@ def processNodes(
             depth + 1,
             arrangeType,
             maxColNodes,
+            filteredLinks,
         )
 
 
@@ -224,17 +234,50 @@ def createSrcNodeMap(nodeTree):
 
 
 def displayTree(
-    nodeTree, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes
+    nodeTree, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes, applyToSelection=False, path=None
 ):
     # Early exit if node tree is empty (T005)
     if len(nodeTree.nodes) == 0:
         return "No nodes to arrange in the node tree."
     
-    srcNodeMap = createSrcNodeMap(nodeTree)
-    # print(srcNodeMap)
+    # T010: Filter by selection if requested
+    all_nodes = list(nodeTree.nodes)
+    if applyToSelection:
+        selected_nodes = [n for n in all_nodes if n.select]
+        print(f"DEBUG: applyToSelection=True, total nodes={len(all_nodes)}, selected={len(selected_nodes)}")
+        
+        # Filter out the currently edited group node itself (Issue #2)
+        if path and len(path) > 0:
+            # The last item in path is the currently edited group node
+            edited_node = path[-1].node if hasattr(path[-1], 'node') else None
+            if edited_node and edited_node in selected_nodes:
+                selected_nodes.remove(edited_node)
+                print(f"DEBUG: Removed edited group node '{edited_node.name}' from selection")
+        if len(selected_nodes) == 0:
+            return "No nodes selected. Please select at least one node or disable 'Selected Nodes Only'."
+        nodes_to_process = selected_nodes
+        # Create a set for fast lookup
+        selected_set = set(selected_nodes)
+        # Filter links to only include those between selected nodes
+        filtered_links = [link for link in nodeTree.links 
+                         if link.from_node in selected_set and link.to_node in selected_set]
+        print(f"DEBUG: Total links in tree: {len(nodeTree.links)}, filtered links: {len(filtered_links)}")
+    else:
+        nodes_to_process = all_nodes
+        filtered_links = list(nodeTree.links)
+    
+    # Create source node map with filtered links
+    srcNodeMap = {}
+    for link in filtered_links:
+        srcLinkInfo = srcNodeMap.get(link.from_node)
+        if srcLinkInfo is None:
+            srcLinkInfo = SrcLinkInfo()
+            srcNodeMap[link.from_node] = srcLinkInfo
+        srcLinkInfo.addLinkCnt(link.to_node)
+    
     nodeGraph = []
-    nodes = nodeTree.nodes
-    srcNodes = {n for n in nodes if (n in {k.from_node for k in nodeTree.links})}
+    nodes = nodes_to_process
+    srcNodes = {n for n in nodes if n in srcNodeMap}
     pureDestNodes = [n for n in nodes if n not in srcNodes]
     processNodes(
         srcNodeMap,
@@ -245,6 +288,7 @@ def displayTree(
         0,
         arrangeType,
         maxColNodes,
+        filtered_links,
     )
     groupNodes = displayNodes(nodeGraph, vAlign, xOffset, yOffset)
     if includeGroup:
@@ -269,6 +313,8 @@ def displayTree(
                         includeGroup,
                         arrangeType,
                         maxColNodes,
+                        applyToSelection,
+                        None,  # Groups have their own path context
                     )
                     processedTrees.add(childNodeTree)
             with bpy.context.temp_override(**override):
@@ -276,12 +322,12 @@ def displayTree(
                 bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
 
 
-def main(context, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes):
-    nodeTree, error = getActiveNodeTree(context)
+def main(context, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes, applyToSelection=False):
+    nodeTree, error, path = getActiveNodeTree(context)
     if error:
         return error
     error = displayTree(
-        nodeTree, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes
+        nodeTree, vAlign, xOffset, yOffset, includeGroup, arrangeType, maxColNodes, applyToSelection, path
     )
     return error
 
@@ -327,6 +373,18 @@ class LineupNodesParams(PropertyGroup):
         description="Maximum count of nodes within column",
     )
 
+    applyToSelection: BoolProperty(
+        name="Selected Nodes Only",
+        default=False,
+        description="Arrange only selected nodes (if True) or all nodes (if False)",
+    )
+
+    searchPattern: bpy.props.StringProperty(
+        name="Search",
+        default="",
+        description="Search nodes by name (leave empty to show all)",
+    )
+
 
 class LineupNodesPanel(Panel):
     bl_label = "Line Up Nodes"
@@ -344,11 +402,65 @@ class LineupNodesPanel(Panel):
         col.prop(params, "yOffset")
         col.prop(params, "maxColNodes")
         col.prop(params, "includeGroup")
+        col.prop(params, "applyToSelection")
 
     def draw(self, context):
         col = self.layout.column()
         LineupNodesPanel.drawPanel(col)
+        
+        # T013: Search/Filter section
+        col.separator()
+        box = col.box()
+        box.label(text="Search Nodes:")
+        box.prop(bpy.context.window_manager.lineupNodeParams, "searchPattern")
+        box.operator("object.khema_searchnodes", text="Find Nodes", icon='VIEWZOOM')
+        
+        col.separator()
         col.operator("object.khema_lineupnodes")
+
+
+class SearchNodesOp(Operator):
+    """Search and select nodes by name"""
+    bl_idname = "object.khema_searchnodes"
+    bl_label = "Find Nodes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        nodeTree, error, path = getActiveNodeTree(context)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        
+        params = bpy.context.window_manager.lineupNodeParams
+        pattern = params.searchPattern.lower()
+        
+        if not pattern:
+            self.report({'INFO'}, "Enter a search pattern first")
+            return {'CANCELLED'}
+        
+        # Search and select matching nodes
+        matches = []
+        for node in nodeTree.nodes:
+            node.select = False  # Deselect all first
+            # Check name (internal ID), label (custom user label), and bl_label (displayed type name)
+            search_fields = [
+                node.name.lower(),
+                node.label.lower() if node.label else "",
+                node.bl_label.lower() if hasattr(node, 'bl_label') else ""
+            ]
+            if any(pattern in field for field in search_fields):
+                node.select = True
+                matches.append(node)
+        
+        if matches:
+            # Focus on first match
+            if hasattr(nodeTree.nodes, 'active'):
+                nodeTree.nodes.active = matches[0]
+            self.report({'INFO'}, f"Found {len(matches)} node(s) matching '{params.searchPattern}'")
+        else:
+            self.report({'WARNING'}, f"No nodes found matching '{params.searchPattern}'")
+        
+        return {'FINISHED'}
 
 
 class LineupNodesOp(Operator):
@@ -366,6 +478,7 @@ class LineupNodesOp(Operator):
             params.includeGroup,
             params.arrangeType,
             params.maxColNodes,
+            params.applyToSelection,
         )
         if error:
             self.report({'ERROR'}, error)
@@ -375,6 +488,7 @@ class LineupNodesOp(Operator):
 
 def register():
     bpy.utils.register_class(LineupNodesPanel)
+    bpy.utils.register_class(SearchNodesOp)
     bpy.utils.register_class(LineupNodesOp)
 
     bpy.utils.register_class(LineupNodesParams)
@@ -388,4 +502,5 @@ def unregister():
     bpy.utils.unregister_class(LineupNodesParams)
 
     bpy.utils.unregister_class(LineupNodesOp)
+    bpy.utils.unregister_class(SearchNodesOp)
     bpy.utils.unregister_class(LineupNodesPanel)
